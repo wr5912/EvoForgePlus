@@ -101,40 +101,7 @@ graph TD
 
 #### 2.3.1. 基础设施层：LiteLLM 与 DSPy 的融合
 
-DSPy 默认支持 OpenAI，我们需要编写一个适配器来通过 LiteLLM 调用 Gemini。
-
-```python
-# infrastructure/llm_provider.py
-import dspy
-import litellm
-import os
-
-class LiteLLM_Wrapper(dspy.LM):
-    def __init__(self, model_name, **kwargs):
-        super().__init__(model=model_name)
-        self.provider = "gemini" # 或其他
-        self.kwargs = kwargs
-
-    def __call__(self, prompt, **kwargs):
-        # 融合默认参数和调用时参数
-        params = {**self.kwargs, **kwargs}
-        messages = [{"role": "user", "content": prompt}]
-        
-        response = litellm.completion(
-            model=self.model,
-            messages=messages,
-            **params
-        )
-        # 提取文本，DSPy 需要返回 list of strings
-        return [response.choices[0].message.content]
-
-    # 实现 DSPy 需要的 inspect_history 等辅助方法...
-
-# 初始化单例
-def init_dspy():
-    gemini = LiteLLM_Wrapper(model="gemini/gemini-1.5-pro", temperature=0.7)
-    dspy.settings.configure(lm=gemini)
-```
+DSPy 默认支持 OpenAI，我们需要编写一个适配器来通过 LiteLLM 调用 LLM。
 
 #### 2.3.2. 数据层：Agent DNA (JSON Schema)
 
@@ -142,27 +109,42 @@ def init_dspy():
 
 ```json
 {
-  "agent_id": "math_solver_v3",
-  "version": 3,
+  "agent_id": "poem_master_v2",
+  "start_node": "generator",
   "nodes": {
-    "planner": {
-      "type": "ChainOfThought", // 映射到 dspy.ChainOfThought
-      "signature": "question -> plan", // dspy signature 字符串
-      "tools": [],
-      "instruction": "拆解数学问题步骤..." // 初始 System Prompt
+    "generator": {
+      "type": "ChainOfThought",
+      "signature": "topic -> content",
+      "instruction": "你是一个新手诗人，会犯押韵错误。根据主题写一首四行诗。"
     },
-    "calculator": {
-      "type": "ReAct", // 映射到 dspy.ReAct
-      "signature": "plan -> answer",
-      "tools": ["python_repl"],
-      "instruction": "执行计算..."
+    "critic": {
+      "type": "ChainOfThought",
+      "signature": "content, topic -> critique, decision",
+      "instruction": "你是一个严格的文学评论家。检查这首诗是否符合主题，是否押韵。如果是好诗，decision 输出 'PASS'；如果需要修改，decision 输出 'FAIL' 并给出 critique 意见。请只输出单词 PASS 或 FAIL。"
+    },
+    "refiner": {
+      "type": "ChainOfThought",
+      "signature": "content, critique -> content",
+      "instruction": "你是一个编辑。根据评论家的意见修改这首诗。直接输出修改后的诗句。"
     }
   },
-  "workflow": [
-    "input -> planner",
-    "planner.plan -> calculator.plan",
-    "calculator.answer -> output"
-  ]
+  "flow": {
+    "generator": {
+      "next": "critic"
+    },
+    "critic": {
+      "type": "branch",
+      "source_var": "decision",
+      "branches": {
+        "PASS": "end",
+        "FAIL": "refiner"
+      },
+      "default": "end"
+    },
+    "refiner": {
+      "next": "critic" 
+    }
+  }
 }
 ```
 
@@ -170,68 +152,10 @@ def init_dspy():
 
 这个类负责读取 JSON 并“编译”成一个可运行的 DSPy Module。
 
-```python
-# engine/dynamic_agent.py
-import dspy
-
-class DynamicAgent(dspy.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.sub_modules = {}
-        
-        for node_name, node_cfg in config['nodes'].items():
-            # 1. 动态构建 Signature
-            signature = dspy.Signature(node_cfg['signature'])
-            signature.__doc__ = node_cfg['instruction'] # 将 Instruction 注入 Signature
-            
-            # 2. 实例化 DSPy 模块
-            if node_cfg['type'] == 'ChainOfThought':
-                module = dspy.ChainOfThought(signature)
-            elif node_cfg['type'] == 'ReAct':
-                # 这里需要加载工具函数列表
-                tools = ToolRegistry.get(node_cfg['tools']) 
-                module = dspy.ReAct(signature, tools=tools)
-            
-            # 3. 注册为当前模块的属性，这样 DSPy 优化器才能追踪到它
-            self.__setattr__(node_name, module)
-            self.sub_modules[node_name] = module
-
-    def forward(self, **kwargs):
-        context = kwargs
-        # 根据 workflow 定义的简易逻辑流转数据 (此处简化为顺序执行)
-        # 实际项目需要实现一个 DAG 解析器
-        
-        # 示例：假设是线性执行
-        for node_name in self.sub_modules:
-            module = getattr(self, node_name)
-            # 自动匹配参数
-            result = module(**context)
-            # 更新上下文
-            context.update(result)
-            
-        return context['answer'] # 假设最终输出叫 answer
-```
-
 #### 2.3.4. 优化器层 (The Evolution)
 
 **A. 内环 (基于 DSPy):**
 直接复用 DSPy 强大的 `MIPROv2` 或 `BootstrapFewShotWithRandomSearch`。
-
-```python
-from dspy.teleprompt import BootstrapFewShot
-
-def run_inner_optimization(agent, trainset, metric_func):
-    # 使用 DSPy 的优化器
-    teleprompter = BootstrapFewShot(metric=metric_func, max_bootstrapped_demos=4)
-    
-    # 这一步会自动：
-    # 1. 运行 agent
-    # 2. 筛选高质量的 input/output 对
-    # 3. 将其作为 few-shot 写入 agent 的 Prompt 中
-    optimized_agent = teleprompter.compile(agent, trainset=trainset)
-    return optimized_agent
-```
 
 **B. 外环 (架构变异):**
 这是你需要自己写的逻辑。
@@ -269,83 +193,3 @@ def run_inner_optimization(agent, trainset, metric_func):
     1.  完善“外环”逻辑。
     2.  实现“元 Agent”：读取 Evaluation Report，决定是继续微调 Prompt (内环) 还是修改 JSON 结构 (外环)。
     3.  实现简单的 DAG 流程控制器。
-
----
-
-### 2.5、 关键代码 Demo (可以直接运行的基础)
-
-这是一个融合了 LiteLLM 和 DSPy 的最小 Demo，展示如何定义 Signature 并进行优化。
-
-```python
-import dspy
-import litellm
-from dspy.teleprompt import BootstrapFewShot
-
-# 1. 配置 LiteLLM 适配器
-class GeminiLM(dspy.LM):
-    def __init__(self, model="gemini/gemini-1.5-flash"):
-        super().__init__(model=model)
-        os.environ["GEMINI_API_KEY"] = "YOUR_API_KEY" # 确保环境变量设置
-
-    def __call__(self, prompt, **kwargs):
-        try:
-            response = litellm.completion(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                **kwargs
-            )
-            return [response.choices[0].message.content]
-        except Exception as e:
-            print(f"Error: {e}")
-            return [""]
-
-# 2. 初始化
-dspy.settings.configure(lm=GeminiLM())
-
-# 3. 定义一个基于 Signature 的模块 (对应 Config 中的一个 Node)
-class BasicGenerator(dspy.Module):
-    def __init__(self):
-        super().__init__()
-        # 定义输入输出，这里对应 Config 中的 signature 字段
-        self.prog = dspy.ChainOfThought("topic -> short_copy")
-    
-    def forward(self, topic):
-        return self.prog(topic=topic)
-
-# 4. 准备数据集 (用于驱动进化)
-# 这里的 input 对应 signature 的 topic，output 对应 short_copy
-train_data = [
-    dspy.Example(topic="挂耳咖啡", short_copy="早八救星！这杯挂耳简直是液态精神，醇厚不酸，无限回购！☕️").with_inputs("topic"),
-    dspy.Example(topic="人体工学椅", short_copy="老腰有救了！这把椅子像是长在背上一样，久坐不累，打工人必备。💺").with_inputs("topic"),
-    # ... 添加更多数据
-]
-
-# 5. 定义评估指标 (Evaluation)
-def validate_copy(example, pred, trace=None):
-    # 简单规则：必须包含 emoji，长度在 10-50 字之间
-    has_emoji = any(char in pred.short_copy for char in "☕️💺🔥✨")
-    length_ok = 10 <= len(pred.short_copy) <= 50
-    return has_emoji and length_ok
-
-# 6. 运行优化器 (内环进化)
-print("开始优化 Agent...")
-teleprompter = BootstrapFewShot(metric=validate_copy, max_bootstrapped_demos=2)
-optimized_agent = teleprompter.compile(BasicGenerator(), trainset=train_data)
-
-# 7. 测试进化后的 Agent
-print("\n测试结果:")
-result = optimized_agent(topic="降噪耳机")
-print(f"Topic: 降噪耳机")
-print(f"Result: {result.short_copy}")
-
-# 8. 查看优化后的 Prompt (包含自动生成的 Few-Shot)
-# dspy.settings.lm.inspect_history(n=1)
-```
-
-### 2.6、 给开发者的特别建议
-
-1.  **关于 DSPy 的学习曲线:** DSPy 的概念（Signature, Module, Teleprompter）一开始会有点绕。请务必把上面的 Demo 跑通，理解它通过 `compile` 方法修改 Agent 内部 `demos` 的原理。
-2.  **LiteLLM 的坑:** 使用 Google Gemini 时，注意 LiteLLM 的版本更新，Google 的 API 策略（Vertex AI vs AI Studio）有时会变。LiteLLM 通常能很好地屏蔽差异。
-3.  **不要过度设计 Workflow:** 在 v0.1 版本，只支持“单节点”或“简单的线性多节点”。不要一开始就写复杂的图执行引擎，那会让你陷入泥潭。
-
-这个方案利用 DSPy 解决了最难的“Prompt 自动优化”部分，你只需要专注于构建“配置管理”和“架构变异”的逻辑，非常适合个人开发者落地。
