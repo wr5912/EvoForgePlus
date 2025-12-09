@@ -64,19 +64,19 @@
 ```mermaid
 graph TD
     subgraph Local_Environment [本地部署环境]
-        Config[JSON Config (Agent DNA)] --> Builder[Dynamic Builder]
-        Builder --> Program[DSPy Program (Compiled)]
+        Config[JSON Config - Agent DNA] --> Builder[Dynamic Builder]
+        Builder --> Program[DSPy Program - Compiled]
         
-        Data[本地训练数据集] --> InnerOpt[DSPy Optimizer (内环)]
+        Data[本地训练数据集] --> InnerOpt[DSPy Optimizer - 内环]
         Program --> InnerOpt
         InnerOpt --> |优化 Prompt/Demos| Program
         
         Program --> Evaluator[评估器]
-        Evaluator --> |分数长期停滞| MetaAgent[架构变异器 (外环)]
+        Evaluator --> |分数长期停滞| MetaAgent[架构变异器 - 外环]
         MetaAgent --> |拆分节点/增加工具| Config
         
-        DB[(SQLite: 版本管理)]
-        VectorDB[(ChromaDB: 知识/记忆)]
+        DB[SQLite版本管理]
+        VectorDB[ChromaDB知识记忆]
     end
     
     Program --> LiteLLM
