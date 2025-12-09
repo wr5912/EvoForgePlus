@@ -1,0 +1,38 @@
+{
+  "agent_id": "poem_master_v2",
+  "start_node": "generator",
+  "nodes": {
+    "generator": {
+      "type": "ChainOfThought",
+      "signature": "topic -> content",
+      "instruction": "你是一个新手诗人，会犯押韵错误。根据主题写一首四行诗。"
+    },
+    "critic": {
+      "type": "ChainOfThought",
+      "signature": "content, topic -> critique, decision",
+      "instruction": "你是一个严格的文学评论家。检查这首诗是否符合主题，是否押韵。如果是好诗，decision 输出 'PASS'；如果需要修改，decision 输出 'FAIL' 并给出 critique 意见。请只输出单词 PASS 或 FAIL。"
+    },
+    "refiner": {
+      "type": "ChainOfThought",
+      "signature": "content, critique -> content",
+      "instruction": "你是一个编辑。根据评论家的意见修改这首诗。直接输出修改后的诗句。"
+    }
+  },
+  "flow": {
+    "generator": {
+      "next": "critic"
+    },
+    "critic": {
+      "type": "branch",
+      "source_var": "decision",
+      "branches": {
+        "PASS": "end",
+        "FAIL": "refiner"
+      },
+      "default": "end"
+    },
+    "refiner": {
+      "next": "critic" 
+    }
+  }
+}

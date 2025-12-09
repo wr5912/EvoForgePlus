@@ -1,0 +1,14 @@
+dspy
+litellm
+python-dotenv
+mlflow
+langfuse
+fastapi
+uvicorn
+streamlit
+streamlit-antd-components
+requests
+pyyaml
+python-multipart
+aiofiles
+pydantic
