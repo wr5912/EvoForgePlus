@@ -57,6 +57,7 @@ api_key = os.getenv("DEEPSEEK_API_KEY")
 if not api_key:
     raise ValueError("DEEPSEEK_API_KEY 环境变量未设置。请在 .env 文件中配置您的 DeepSeek API 密钥。")
 
+
 # 创建 DSPy 语言模型实例
 LM = dspy.LM(
     model=model,
