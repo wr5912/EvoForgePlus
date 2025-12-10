@@ -8,18 +8,29 @@ EvoForgePlus 主入口文件
 3. case3: 完整的进化流程，包括多代变异和最佳配置保存
 
 该文件还配置了 MLflow 实验追踪和 DSPy 语言模型设置。
+
+环境变量配置：
+所有敏感配置（如API密钥）都从.env文件中读取，确保安全性和可移植性。
+请确保项目根目录下存在.env文件，并正确配置相关环境变量。
 """
 
+import os
 import json
 import dspy
+from dotenv import load_dotenv
 from evoforge.agent_dna_config import AgentDNAConfig
 from evoforge.engine import GraphAgent
 import mlflow
 from evoforge.optimizer import EvoOptimizer
 
+# 加载环境变量
+# 从项目根目录的.env文件中读取配置
+load_dotenv()
+
 # 配置 MLflow 实验追踪
-# 设置 MLflow 跟踪服务器的 URI（本地运行）
-mlflow.set_tracking_uri("http://127.0.0.1:5000")
+# 设置 MLflow 跟踪服务器的 URI（本地运行），从环境变量读取，默认为本地服务器
+mlflow_tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
+mlflow.set_tracking_uri(mlflow_tracking_uri)
 
 # 启用 DSPy 自动日志记录
 # log_compiles: 跟踪优化过程
@@ -31,15 +42,20 @@ mlflow.dspy.autolog(
     log_traces_from_compile=True
 )
 
-# 创建唯一实验名称用于区分不同运行
-mlflow.set_experiment("EvoForgePlus")
+# 创建唯一实验名称用于区分不同运行，从环境变量读取，默认为 "EvoForgePlus"
+mlflow_experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", "EvoForgePlus")
+mlflow.set_experiment(mlflow_experiment_name)
 
 # 配置 DSPy 语言模型
-# 使用 DeepSeek Reasoner 模型
+# 从环境变量读取 DeepSeek API 配置，确保敏感信息不暴露在代码中
 # 注意：必须按照 LiteLLM 支持的格式指定模型名称
-model = "deepseek/deepseek-reasoner"
-api_base = "https://api.deepseek.com"
-api_key = "sk-5363609c751c46f99cc17737a58d60a7"
+model = os.getenv("DEEPSEEK_MODEL", "deepseek/deepseek-reasoner")
+api_base = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
+api_key = os.getenv("DEEPSEEK_API_KEY")
+
+# 验证必要的环境变量是否已设置
+if not api_key:
+    raise ValueError("DEEPSEEK_API_KEY 环境变量未设置。请在 .env 文件中配置您的 DeepSeek API 密钥。")
 
 # 创建 DSPy 语言模型实例
 LM = dspy.LM(
@@ -50,6 +66,13 @@ LM = dspy.LM(
 
 # 全局配置 DSPy 使用指定的语言模型
 dspy.configure(lm=LM)
+
+# 打印配置信息（调试用，生产环境可移除）
+print(f"✅ MLflow 跟踪服务器: {mlflow_tracking_uri}")
+print(f"✅ MLflow 实验名称: {mlflow_experiment_name}")
+print(f"✅ DeepSeek 模型: {model}")
+print(f"✅ DeepSeek API 基础地址: {api_base}")
+print("✅ DeepSeek API 密钥: 已配置")
 
 # 准备训练数据集
 # 这是驱动进化的核心，用于告诉系统什么是好的表现
