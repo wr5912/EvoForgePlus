@@ -57,7 +57,6 @@ api_key = os.getenv("DEEPSEEK_API_KEY")
 if not api_key:
     raise ValueError("DEEPSEEK_API_KEY 环境变量未设置。请在 .env 文件中配置您的 DeepSeek API 密钥。")
 
-
 # 创建 DSPy 语言模型实例
 LM = dspy.LM(
     model=model,
@@ -258,6 +257,7 @@ def case3():
     
     这个用例会生成一个经过多代优化的最佳智能体配置，并保存到文件中。
     """
+
     # 3. 定义指标
     def metric_func(gold, pred, trace=None):
         """
@@ -293,7 +293,7 @@ def case3():
     print("\n>>> Evolution Complete!")
     print(f"Best Config Structure: {best_config.nodes.keys()}")
     with open("best_agent_dna_config.json", "w") as f:
-        json.dump(best_config.model_dump_json(), f, indent=2, ensure_ascii=False)
+        json.dump(best_config.model_dump(), f, indent=2, ensure_ascii=False)
 
 
 if __name__ == "__main__":

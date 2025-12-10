@@ -35,9 +35,7 @@ logger = logging.getLogger("EvoForge")
 
 class ArchitectureRefinerSignature(dspy.Signature):
     """
-    元架构师智能体的签名定义
-    
-    这个智能体负责分析当前智能体配置和失败案例，然后修改 JSON 配置以解决性能瓶颈。
+    负责分析当前智能体配置和失败案例，然后修改 JSON 配置以解决性能瓶颈。
     
     可用变异策略：
     1. 节点拆分 (Splitting): 如果某节点任务过重，将其拆分为 Planner -> Executor
@@ -70,6 +68,7 @@ class MetaArchitect(dspy.Module):
     这个类使用 ChainOfThought 模块来构建一个能够思考并修改智能体架构的智能体。
     它接收当前 DNA 配置和诊断报告，然后输出优化后的配置和修改原因。
     """
+
     def __init__(self):
         """
         初始化元架构师智能体
@@ -113,6 +112,7 @@ class EvoOptimizer:
         meta_architect (MetaArchitect): 元架构师智能体实例
         history (list): 进化历史记录
     """
+
     def __init__(self,
                  agent_dna_config: AgentDNAConfig,
                  trainset: List[dspy.Example],
@@ -182,7 +182,7 @@ class EvoOptimizer:
             optimized_agent = self._run_inner_loop(agent)
 
             # --- Stage 3: 评估与诊断 ---
-            score, bad_cases = self._evaluate_agent(optimized_agent)
+            score, diagnosis_report = self._evaluate_agent(optimized_agent)
             logger.info(f"📊 Generation {generation} Score: {score:.2f}%")
 
             # 记录历史
@@ -200,7 +200,7 @@ class EvoOptimizer:
             # --- Stage 4: 外环进化 (Architecture Mutation) ---
             if generation < self.max_generations - 1:
                 logger.info("🔧 Score insufficient. Triggering Outer Loop (Mutation)...")
-                new_config = self._run_outer_loop(score, bad_cases)
+                new_config = self._run_outer_loop(score, diagnosis_report)
                 if new_config:
                     self.cur_agent_dna_config = new_config
                 else:
@@ -290,11 +290,11 @@ class EvoOptimizer:
         score = (correct / total) * 100 if total > 0 else 0
 
         # 生成诊断报告 summary
-        diagnosis = f"Current Score: {score:.2f}%\nFailure Count: {len(bad_cases_log)}\n"
+        diagnosis_report = f"Current Score: {score:.2f}%\nFailure Count: {len(bad_cases_log)}\n"
         if bad_cases_log:
-            diagnosis += "Top 3 Bad Cases:\n" + "\n---\n".join(bad_cases_log[:3])
+            diagnosis_report += "Top 3 Bad Cases:\n" + "\n---\n".join(bad_cases_log[:3])
 
-        return score, diagnosis
+        return score, diagnosis_report
 
     def _run_outer_loop(self, current_score, diagnosis_report) -> AgentDNAConfig:
         """
@@ -318,14 +318,11 @@ class EvoOptimizer:
         """
         logger.info("   [Outer Loop] Meta-Architect is redesigning the agent...")
 
-        # 准备上下文
-        current_dna_str = json.dumps(self.cur_agent_dna_config, indent=2, ensure_ascii=False)
-
         # 调用 Meta-Architect
         try:
             # 使用 MetaArchitect (ChainOfThought)
             prediction = self.meta_architect(
-                current_dna_json=current_dna_str,
+                current_dna_json=self.cur_agent_dna_config.model_dump_json(),
                 diagnosis_report=diagnosis_report
             )
 
