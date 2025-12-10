@@ -39,7 +39,7 @@ mlflow.set_experiment("EvoForgePlus")
 # 注意：必须按照 LiteLLM 支持的格式指定模型名称
 model = "deepseek/deepseek-reasoner"
 api_base = "https://api.deepseek.com"
-api_key = "sk-5363609c751c46f99cc17737a58d60a7"
+api_key = "sk-5363609c7"
 
 # 创建 DSPy 语言模型实例
 LM = dspy.LM(
