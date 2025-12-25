@@ -1,143 +1,299 @@
-# -*- coding: utf-8 -*-
-"""
-EvoForgePlus 引擎模块：图智能体（GraphAgent）实现
-
-这个模块定义了 GraphAgent 类，它基于代理 DNA 配置动态构建和执行图结构的工作流。
-智能体由多个节点组成，每个节点对应一个 DSPy 模块（如 ChainOfThought、ReAct 等），
-节点之间通过流规则（顺序流或分支流）连接，形成可执行的工作流。
-
-核心功能：
-1. 根据 AgentDNAConfig 动态构建智能体节点
-2. 执行智能体工作流，支持顺序和分支路由
-3. 限制最大执行步骤以防止无限循环
-"""
-
-from evoforge.agent_dna_config import AgentDNAConfig, BranchFlow
 import dspy
+import yaml
+import os
+import importlib
+from typing import Dict, Any, Type, Callable, Optional, List
 
+
+# =============================================================================
+# 1. 辅助工具: 动态加载器与解析器
+# =============================================================================
+
+class ToolResolver:
+    """负责将 tools.yaml 中的字符串路径解析为可执行的 Python 函数"""
+
+    @staticmethod
+    def import_tool(path_str: str) -> Callable:
+        """
+        例如: "lib.math_utils.calculate_sum" -> 对应的函数对象
+        """
+        try:
+            module_path, func_name = path_str.rsplit('.', 1)
+            module = importlib.import_module(module_path)
+            return getattr(module, func_name)
+        except (ImportError, AttributeError, ValueError) as e:
+            raise ImportError(f"无法加载工具: {path_str}. 错误: {e}")
+
+
+class DNALoader:
+    """负责加载 YAML 配置文件并合并为一个完整的 Config 字典"""
+
+    @staticmethod
+    def load(entry_yaml_path: str) -> Dict[str, Any]:
+        if not os.path.exists(entry_yaml_path):
+            raise FileNotFoundError(f"找不到入口配置文件: {entry_yaml_path}")
+
+        base_dir = os.path.dirname(entry_yaml_path)
+
+        # 1. 加载主清单 (agent.yaml)
+        with open(entry_yaml_path, 'r', encoding='utf-8') as f:
+            main_config = yaml.safe_load(f)
+
+        full_config = {
+            "metadata": main_config,  # 保存 id, version 等元数据
+            "types": {},
+            "signatures": {},
+            "tools": {},
+            "knowledge": {},
+            "modules": {},
+            "workflow": {}
+        }
+
+        # 2. 递归加载 includes
+        includes = main_config.get("includes", {})
+
+        # 定义映射关系: include_key -> config_key
+        # 例如: includes 中的 'signatures' 文件内容加载到 full_config['signatures']
+        section_map = {
+            "types": "types",
+            "signatures": "signatures",
+            "tools": "tools",
+            "knowledge": "knowledge",
+            "modules": "modules",
+            "workflow": "workflow"
+        }
+
+        for inc_key, rel_path in includes.items():
+            target_section = section_map.get(inc_key)
+            if not target_section:
+                continue
+
+            full_path = os.path.join(base_dir, rel_path)
+            if not os.path.exists(full_path):
+                print(f"Warning: Included file not found: {full_path}")
+                continue
+
+            with open(full_path, 'r', encoding='utf-8') as f:
+                content = yaml.safe_load(f)
+
+            # 根据 YAML 文件结构合并数据
+            # 假设子 YAML 文件的根键通常就是 section 名 (如 tools.yaml 里是以 tools: 开头)
+            if content:
+                # 如果文件内容包含根 key (如 tools: ...), 取其值；否则直接合并整个 content
+                data_to_merge = content.get(target_section, content)
+
+                # Flow 通常是一个嵌套字典，直接替换或更新
+                if target_section == "workflow":
+                    full_config["workflow"] = data_to_merge
+                # 其他部分通常是字典列表，进行 update
+                elif isinstance(full_config[target_section], dict) and isinstance(data_to_merge, dict):
+                    full_config[target_section].update(data_to_merge)
+
+        return full_config
+
+
+class SignatureFactory:
+    """动态创建 DSPy Signature 类"""
+
+    @staticmethod
+    def create(name: str, sig_config: Dict[str, Any]) -> Type[dspy.Signature]:
+        # 1. 准备类属性 (Docstring 是关键)
+        class_attrs = {
+            "__doc__": sig_config.get("docstring", "").strip()
+        }
+
+        # 2. 动态添加 Inputs
+        for field_name, meta in sig_config.get("inputs", {}).items():
+            desc = meta.get("desc", "") if isinstance(meta, dict) else str(meta)
+            class_attrs[field_name] = dspy.InputField(desc=desc)
+
+        # 3. 动态添加 Outputs
+        for field_name, meta in sig_config.get("outputs", {}).items():
+            desc = meta.get("desc", "") if isinstance(meta, dict) else str(meta)
+            class_attrs[field_name] = dspy.OutputField(desc=desc)
+
+        # 4. 构造类
+        return type(name, (dspy.Signature,), class_attrs)
+
+
+# =============================================================================
+# 2. 核心引擎: GraphAgent
+# =============================================================================
 
 class GraphAgent(dspy.Module):
     """
-    图智能体类：基于 DSPy 模块的动态工作流执行器
+    基于 YAML 配置的动态图智能体执行器。
 
-    这个类将 AgentDNAConfig 转换为可执行的智能体工作流。它通过动态创建 DSPy 模块
-    作为工作流节点，并根据流规则在节点之间进行路由，实现复杂的智能体行为。
-
-    属性:
-        agent_dna_config (AgentDNAConfig): 智能体 DNA 配置对象
-        start_node (str): 起始节点名称
-        max_steps (int): 最大执行步骤数，防止无限循环
+    它负责：
+    1. 加载并组装 components (Signature + Tools -> Modules)
+    2. 维护 Tool Registry
+    3. 执行 workflow 定义的图逻辑
     """
 
-    def __init__(self, agent_dna_config: AgentDNAConfig):
-        """
-        初始化 GraphAgent 实例
-
-        参数:
-            agent_dna_config (AgentDNAConfig): 智能体 DNA 配置对象，
-                包含节点定义、流规则和起始节点等信息
-
-        初始化步骤:
-            1. 保存配置并提取起始节点
-            2. 设置最大执行步骤数
-            3. 动态构建所有节点对应的 DSPy 模块
-        """
+    def __init__(self, agent_yaml_path: str):
         super().__init__()
 
-        # --- 步骤 1: Pydantic 校验 ---
-        # 保存智能体 DNA 配置对象（已经通过 Pydantic 验证）
-        self.agent_dna_config: AgentDNAConfig = agent_dna_config
+        # --- 步骤 1: 加载完整配置 (Manifest -> All Layers) ---
+        self.config = DNALoader.load(agent_yaml_path)
 
-        # 从配置中提取起始节点名称
-        self.start_node = self.agent_dna_config.start_node
-        # 设置最大执行步骤数，防止无限循环
-        self.max_steps = 15
+        # --- 步骤 2: 初始化资源 (Tools) ---
+        # 将 tools.yaml 中的定义解析为实际的 Python 函数对象
+        self.tool_registry = {}
+        for tool_name, tool_cfg in self.config.get("tools", {}).items():
+            path_str = tool_cfg.get("path")
+            if path_str:
+                try:
+                    func = ToolResolver.import_tool(path_str)
+                    # 可以在这里包装 docstring，如果 YAML 里有 desc
+                    if "desc" in tool_cfg:
+                        func.__doc__ = tool_cfg["desc"]
+                    self.tool_registry[tool_name] = func
+                except Exception as e:
+                    print(f"Error loading tool '{tool_name}': {e}")
 
-        # --- 步骤 2: 动态构建节点 ---
-        # 遍历配置中的所有节点，为每个节点创建对应的 DSPy 模块
-        for node_name, node_cfg in self.agent_dna_config.nodes.items():
-            # 根据节点配置创建 DSPy 签名（Signature）
-            signature = dspy.Signature(node_cfg.signature)
-            # 将节点的指令设置为签名的文档字符串
-            signature.__doc__ = node_cfg.instruction
+        # --- 步骤 3: 动态构建 Signatures ---
+        self.sig_classes = {}
+        for name, sig_cfg in self.config.get("signatures", {}).items():
+            self.sig_classes[name] = SignatureFactory.create(name, sig_cfg)
 
-            # 根据节点类型创建相应的 DSPy 模块
-            if node_cfg.type == 'ChainOfThought':
-                module = dspy.ChainOfThought(signature)
-            elif node_cfg.type == 'ReAct':
-                # 注意：这里简化了工具加载，实际实现应从 TOOL_REGISTRY 导入工具
-                # tools = [TOOL_REGISTRY[t] for t in node_cfg.tools ...]
-                module = dspy.ReAct(signature, tools=[])  # 简化演示
+        # --- 步骤 4: 实例化 Modules (Components Layer) ---
+        self.modules_config = self.config.get("modules", {})
+
+        for node_name, mod_cfg in self.modules_config.items():
+            # 4.1 获取 Signature 类
+            sig_name = mod_cfg.get("signature")
+            if sig_name in self.sig_classes:
+                signature = self.sig_classes[sig_name]
             else:
-                # 默认为 Predict 模块
+                # 容错：允许内联字符串定义 (e.g. "q -> a")
+                signature = dspy.Signature(sig_name)
+                signature.__doc__ = mod_cfg.get("instruction", "")
+
+            # 4.2 根据类型实例化 DSPy 模块
+            mod_type = mod_cfg.get("type", "Predict")
+
+            if mod_type == 'ChainOfThought':
+                module = dspy.ChainOfThought(signature)
+
+            elif mod_type == 'ReAct':
+                # 关键：从 registry 中解析工具
+                tool_refs = mod_cfg.get("tools", [])
+                tools_for_node = []
+                for t_name in tool_refs:
+                    if t_name in self.tool_registry:
+                        tools_for_node.append(self.tool_registry[t_name])
+                    else:
+                        print(f"Warning: Module '{node_name}' refers to unknown tool '{t_name}'")
+
+                module = dspy.ReAct(signature, tools=tools_for_node)
+
+            elif mod_type == 'Predict':
                 module = dspy.Predict(signature)
 
-            # 将创建的模块动态设置为当前实例的属性，以便后续访问
+            else:
+                raise ValueError(f"Unsupported module type: {mod_type}")
+
+            # 4.3 注册为属性 (DSPy 优化器需要能访问到这些属性)
             self.__setattr__(node_name, module)
+
+        # --- 步骤 5: 准备流程控制 ---
+        self.flow_config = self.config.get("workflow", {})
+        self.start_node = self.flow_config.get("start_node")
+        self.rules = self.flow_config.get("rules", {})
+        self.max_steps = 15
 
     def forward(self, **kwargs):
         """
-        执行智能体工作流的主方法
-
-        参数:
-            **kwargs: 输入参数，将作为初始上下文传递给第一个节点
-
-        返回:
-            dspy.Prediction: 包含最终执行结果的预测对象
-
-        工作流程:
-            1. 初始化上下文和当前节点
-            2. 循环执行节点直到达到结束节点或最大步数
-            3. 在每个节点执行 DSPy 模块并更新上下文
-            4. 根据流规则决定下一个节点（顺序流或分支流）
-            5. 返回最终上下文作为预测结果
-
-        注意:
-            - 使用 max_steps 防止无限循环
-            - 分支流根据上下文变量的值决定下一个节点
-            - 顺序流直接跳转到下一个节点
+        执行 workflow.yaml 定义的工作流
         """
-        # 初始化上下文（复制输入参数）
         context = kwargs.copy()
-        # 从起始节点开始执行
         current_node_name = self.start_node
         steps = 0
 
-        # 主执行循环：直到到达结束节点或超过最大步数
+        # 记录执行路径 (用于调试和优化)
+        trace_path = []
+
+        print(f"\n🚀 Agent Started. Input keys: {list(context.keys())}")
+
         while current_node_name != "end" and steps < self.max_steps:
-            # 获取当前节点对应的 DSPy 模块
+            trace_path.append(current_node_name)
+
+            # 1. 检查节点是否存在
+            if not hasattr(self, current_node_name):
+                print(f"Error: Node '{current_node_name}' not defined in modules.")
+                break
+
             module = getattr(self, current_node_name)
-            # 调试输出：显示当前节点和上下文
-            print(f"forward::{current_node_name}: {context}")
-            # 执行当前节点的 DSPy 模块
-            pred = module(**context)
-            # 将预测结果更新到上下文中
-            for k, v in pred.items():
-                context[k] = v
 
-            # --- 步骤 3: 路由逻辑 (基于 Schema 对象) ---
-            # 获取当前节点的流规则
-            flow_rule = self.agent_dna_config.flow.get(current_node_name)
+            # 2. 执行模块
+            print(f"👉 Step {steps}: Running [{current_node_name}]")
+            try:
+                # DSPy 会自动从 context 匹配参数
+                prediction = module(**context)
 
-            # 如果没有流规则，则结束执行
-            if not flow_rule:
+                # 更新上下文
+                for k, v in prediction.items():
+                    context[k] = v
+            except Exception as e:
+                print(f"❌ Error executing node '{current_node_name}': {e}")
+                break
+
+            # 3. 路由逻辑 (Flow Control)
+            rule = self.rules.get(current_node_name)
+
+            if not rule:
+                # 如果没有定义后续规则，默认结束
                 current_node_name = "end"
 
-            # 判断流规则类型：分支流
-            elif isinstance(flow_rule, BranchFlow):
-                # 从上下文中获取分支决策变量
-                val = context.get(flow_rule.source_var, "").strip().upper()
-                # 根据变量值选择分支，如果没有匹配则使用默认分支
-                next_node = flow_rule.branches.get(val, flow_rule.default)
-                current_node_name = next_node
-
-            # 流规则类型：顺序流
             else:
-                # 顺序流直接跳转到下一个节点
-                current_node_name = flow_rule.next
+                rule_type = rule.get("type", "sequence")  # 默认为顺序流
 
-            # 增加步数计数器
+                # --- 分支流 (Branch) ---
+                if rule_type == "branch":
+                    source_var = rule.get("source_var")
+                    val = str(context.get(source_var, "")).strip()
+
+                    # 查找匹配的分支
+                    branches = rule.get("branches", {})
+                    # 简单匹配策略：完全匹配 或 包含匹配 (视业务需求而定)
+                    # 这里使用包含匹配以提高鲁棒性 (LLM 输出可能包含标点)
+                    next_node = rule.get("default", "end")
+
+                    found_match = False
+                    for key, target in branches.items():
+                        if key.upper() in val.upper():  # 忽略大小写
+                            next_node = target
+                            found_match = True
+                            print(f"   🔀 Branch: '{val}' matches '{key}' -> Goto {target}")
+                            break
+
+                    if not found_match:
+                        print(f"   🔀 Branch: '{val}' no match -> Goto Default ({next_node})")
+
+                    current_node_name = next_node
+
+                # --- 顺序流 (Sequence) ---
+                else:
+                    # type: sequence
+                    current_node_name = rule.get("next", "end")
+
             steps += 1
 
-        # 返回最终上下文作为预测结果
+        # 将 trace 路径注入结果，方便外层分析
+        context["_trace_path"] = trace_path
+
+        if steps >= self.max_steps:
+            print("⚠️ Max steps reached. Terminating.")
+
         return dspy.Prediction(**context)
+
+
+# ==========================================
+# 4. 使用示例
+# ==========================================
+if __name__ == "__main__":
+    # 直接传入入口 yaml 文件路径
+    agent = GraphAgent("DNA/agent.yaml")
+
+    # 运行
+    agent(user_query="My computer is broken", full_document_text="Manual...")

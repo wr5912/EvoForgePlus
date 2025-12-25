@@ -1,0 +1,408 @@
+这是一个非常符合工程化落地的需求。将庞大的 JSON 拆分为模块化的 YAML 文件，不仅提高了**可读性**（支持注释、多行文本），还利于**团队协作**（多人开发不同的模块）和**版本管理**。
+
+我们将采用 **"主清单 (Manifest) + 组件 (Components)"** 的架构。
+
+### 📂 1. 推荐的项目文件结构
+
+```text
+my_agent_project/
+├── agent.yaml                # [入口] 主清单文件，定义元数据和引用
+├── definitions/              # [定义层]
+│   ├── types.yaml            # 自定义类型 (Enums, Pydantic Models)
+│   └── signatures.yaml       # DSPy 签名定义 (可按业务拆分多个)
+├── modules/                  # [组件层]
+│   └── nodes.yaml            # 节点/模组实例化配置
+└── graph/                    # [逻辑层]
+    └── workflow.yaml         # 流量、分支、循环逻辑
+```
+
+---
+
+### 📝 2. YAML 文件内容详解
+
+#### 2.1 主清单: `agent.yaml`
+这是加载器的入口，负责把散落的积木拼起来。
+
+```yaml
+# agent.yaml
+agent_id: customer_support_bot_v3
+version: 3.0.0
+description: >
+  企业级客户支持 Agent，具备长文档分块摘要能力，
+  并能根据用户意图自动路由至不同专家。
+
+# 配置引用路径 (相对于当前文件)
+includes:
+  types: "definitions/types.yaml"
+  signatures: 
+    - "definitions/signatures.yaml"
+  nodes: 
+    - "modules/nodes.yaml"
+  flow: "graph/workflow.yaml"
+```
+
+#### 2.2 类型定义: `definitions/types.yaml`
+集中管理自定义类型，方便后续 Signature 复用。
+
+```yaml
+# definitions/types.yaml
+types:
+  UrgencyEnum: "Literal[1, 2, 3, 4, 5]"
+  CategoryEnum: "Literal['Billing', 'Technical', 'General', 'Spam']"
+  
+  # 如果将来支持 Pydantic Model，可以在这里定义结构
+  # CustomerInfo: ...
+```
+
+#### 2.3 签名定义: `definitions/signatures.yaml`
+**核心部分**。YAML 的 `|` 语法非常适合编写复杂的 Docstring（这对 Prompt 效果至关重要）。
+
+```yaml
+# definitions/signatures.yaml
+signatures:
+  RouterSignature:
+    docstring: |
+      You are a customer support manager. 
+      Analyze the incoming query to determine the customer's intent and urgency.
+      Please pay attention to the emotional tone of the user.
+    inputs:
+      user_query:
+        desc: "The raw text message from a customer ticket"
+        type: str
+    outputs:
+      intent:
+        desc: "One of: Billing, Technical, General, Spam"
+        type: CategoryEnum  # 引用 types.yaml 中的定义
+      urgency_score:
+        desc: "Integer 1-5 (5 is highest urgency)"
+        type: UrgencyEnum
+
+  ChunkSummarizerSignature:
+    docstring: |
+      Summarize the given text chunk.
+      Extract key information relevant to customer support issues like product bugs or refund requests.
+    inputs:
+      chunk_text:
+        desc: "A segment of a larger document"
+        type: str
+    outputs:
+      key_points:
+        desc: "Concise bullet points of key information"
+        type: str
+
+  RefundSignature:
+    docstring: "Handle refund requests based on company policy context."
+    inputs:
+      query:
+        desc: "User's specific refund request"
+      context:
+        desc: "Relevant policy document summary extracted from knowledge base"
+    outputs:
+      response:
+        desc: "A polite, policy-compliant response"
+```
+
+#### 2.4 节点配置: `modules/nodes.yaml`
+实例化 DSPy Module，将 Signature 和 Module 类型绑定。
+
+```yaml
+# modules/nodes.yaml
+nodes:
+  # === 工具节点 ===
+  splitter:
+    type: Tool
+    tool_name: text_splitter
+    instruction: "Split long text into fixed-size chunks."
+
+  # === DSPy 模块节点 ===
+  summarizer:
+    type: ChainOfThought
+    signature: ChunkSummarizerSignature  # 引用 signatures.yaml
+
+  router:
+    type: ChainOfThought
+    signature: RouterSignature
+
+  refund_expert:
+    type: ChainOfThought
+    signature: RefundSignature
+
+  tech_expert:
+    type: ChainOfThought
+    # 也可以直接内联定义简单签名，不一定要在 signatures.yaml 里
+    signature: "query, context -> response"
+    instruction: |
+      You are a technical support expert. 
+      Provide step-by-step troubleshooting based on the context.
+
+  general_chat:
+    type: Predict
+    signature: "query -> response"
+    instruction: "A helpful general assistant for small talk."
+```
+
+#### 2.5 流程逻辑: `graph/workflow.yaml`
+定义图的拓扑结构。
+
+```yaml
+# graph/workflow.yaml
+flow:
+  start_node: splitter
+  
+  rules:
+    # 1. 预处理：分块
+    splitter:
+      type: sequence
+      next: summarizer_loop
+
+    # 2. 循环：Map Reduce 处理文档
+    summarizer_loop:
+      type: map
+      source_list: chunks          # 上一步 splitter 产生的变量
+      apply_node: summarizer       # 循环调用的节点
+      output_var: document_summary # 聚合后的变量名
+      reduce_strategy: join_newline
+      next: router
+
+    # 3. 路由：分支判断
+    router:
+      type: branch
+      source_var: intent           # 监听 router 节点输出的 intent 字段
+      branches:
+        Billing: refund_expert
+        Technical: tech_expert
+      default: general_chat
+
+    # 4. 终结节点
+    refund_expert: 
+      next: end
+    tech_expert: 
+      next: end
+    general_chat: 
+      next: end
+```
+
+---
+
+### 🚀 3. 配套代码：YAML 加载器与动态构建
+
+我们需要升级 `engine.py`，增加一个 `DNALoader` 类来处理 YAML 文件的读取和合并。
+
+**安装依赖:**
+```bash
+pip install pyyaml
+```
+
+**完整的 `engine.py` (含 Loader):**
+
+```python
+import dspy
+import yaml
+import os
+from typing import Dict, Any, Type, List
+
+# ==========================================
+# 1. DNA Loader (YAML 加载与合并)
+# ==========================================
+class DNALoader:
+    @staticmethod
+    def load(entry_yaml_path: str) -> Dict[str, Any]:
+        """
+        加载主 YAML 并递归合并所有引用的子文件，返回完整的 Config Dict
+        """
+        base_dir = os.path.dirname(entry_yaml_path)
+        
+        with open(entry_yaml_path, 'r', encoding='utf-8') as f:
+            main_config = yaml.safe_load(f)
+        
+        full_config = {
+            "agent_id": main_config.get("agent_id"),
+            "types": {},
+            "signatures": {},
+            "nodes": {},
+            "flow": {}
+        }
+
+        # 辅助函数：加载文件并更新字典
+        def load_and_merge(section_name, relative_path):
+            full_path = os.path.join(base_dir, relative_path)
+            with open(full_path, 'r', encoding='utf-8') as f:
+                content = yaml.safe_load(f)
+                # 假设子文件里直接包含 section_name 对应的 key (如 types.yaml 里有 types: ...)
+                # 或者子文件就是纯内容，这里根据上面的 YAML 结构，子文件包含根 key
+                if content and section_name in content:
+                    full_config[section_name].update(content[section_name])
+                elif content and section_name == "flow": # flow 通常在文件中是根对象
+                    full_config["flow"] = content.get("flow", {})
+
+        # 1. Load Types
+        if "types" in main_config.get("includes", {}):
+            load_and_merge("types", main_config["includes"]["types"])
+
+        # 2. Load Signatures (支持列表)
+        sig_paths = main_config.get("includes", {}).get("signatures", [])
+        if isinstance(sig_paths, str): sig_paths = [sig_paths]
+        for p in sig_paths:
+            load_and_merge("signatures", p)
+
+        # 3. Load Nodes (支持列表)
+        node_paths = main_config.get("includes", {}).get("nodes", [])
+        if isinstance(node_paths, str): node_paths = [node_paths]
+        for p in node_paths:
+            load_and_merge("nodes", p)
+
+        # 4. Load Flow
+        if "flow" in main_config.get("includes", {}):
+            load_and_merge("flow", main_config["includes"]["flow"])
+
+        return full_config
+
+# ==========================================
+# 2. 动态签名构建 (复用之前的逻辑)
+# ==========================================
+def create_dynamic_signature(name: str, sig_config: Dict, type_registry: Dict) -> Type[dspy.Signature]:
+    class_attributes = {
+        "__doc__": sig_config.get("docstring", "").strip()
+    }
+
+    # 处理 Input
+    for field_name, meta in sig_config.get("inputs", {}).items():
+        # 这里简单处理 desc，如果有 type 可以在这里做扩展校验
+        class_attributes[field_name] = dspy.InputField(desc=meta.get("desc", ""))
+
+    # 处理 Output
+    for field_name, meta in sig_config.get("outputs", {}).items():
+        class_attributes[field_name] = dspy.OutputField(desc=meta.get("desc", ""))
+
+    return type(name, (dspy.Signature,), class_attributes)
+
+# ==========================================
+# 3. Dynamic Bot Engine (支持 YAML 结构)
+# ==========================================
+class DynamicBot(dspy.Module):
+    def __init__(self, entry_yaml_path: str):
+        super().__init__()
+        
+        # === Step A: Load DNA from YAMLs ===
+        print(f"📂 Loading Agent DNA from: {entry_yaml_path}")
+        self.config = DNALoader.load(entry_yaml_path)
+        
+        # === Step B: Register Types (简化版) ===
+        self.custom_types = self.config.get("types", {})
+        
+        # === Step C: Build Signatures ===
+        self.sig_classes = {}
+        for name, sig_cfg in self.config.get("signatures", {}).items():
+            self.sig_classes[name] = create_dynamic_signature(name, sig_cfg, self.custom_types)
+            
+        # === Step D: Build Nodes ===
+        self.flow_rules = self.config["flow"].get("rules", {})
+        self.start_node = self.config["flow"].get("start_node")
+        
+        # 实例化工具 (Mock)
+        self.tools = {
+            "text_splitter": lambda text: [text[i:i+50] for i in range(0, len(text), 50)] if text else []
+        }
+
+        for node_name, node_cfg in self.config["nodes"].items():
+            node_type = node_cfg["type"]
+            
+            if node_type in ["ChainOfThought", "Predict", "ReAct"]:
+                # 解析 Signature
+                sig_ref = node_cfg["signature"]
+                if sig_ref in self.sig_classes:
+                    signature = self.sig_classes[sig_ref]
+                else:
+                    # 内联字符串签名
+                    signature = dspy.Signature(sig_ref)
+                    signature.__doc__ = node_cfg.get("instruction", "")
+                
+                # 实例化
+                if node_type == "ChainOfThought":
+                    module = dspy.ChainOfThought(signature)
+                elif node_type == "Predict":
+                    module = dspy.Predict(signature)
+                
+                self.__setattr__(node_name, module)
+
+    def forward(self, **kwargs):
+        context = kwargs.copy()
+        current = self.start_node
+        
+        print(f"\n🚀 Agent Started at [{current}]")
+        
+        while current != "end":
+            rule = self.flow_rules.get(current, {"next": "end"})
+            node_cfg = self.config["nodes"][current]
+            print(f"Running Node: {current} ({node_cfg['type']})")
+            
+            # --- Node Execution Logic ---
+            if node_cfg["type"] == "Tool":
+                # Tool Logic
+                tool_fn = self.tools.get(node_cfg["tool_name"])
+                # 简单映射：假设工具只要 'full_document_text'
+                val = context.get("full_document_text", "")
+                res = tool_fn(val)
+                context["chunks"] = res # 假设硬编码输出给 chunks
+                
+            elif node_cfg["type"] in ["ChainOfThought", "Predict"]:
+                # DSPy Logic
+                module = getattr(self, current)
+                try:
+                    pred = module(**context)
+                    # Merge context
+                    for k, v in pred.items():
+                        context[k] = v
+                except Exception as e:
+                    print(f"Error: {e}")
+                    break
+
+            # --- Flow Logic ---
+            ftype = rule.get("type", "sequence")
+            
+            if ftype == "sequence":
+                current = rule.get("next", "end")
+                
+            elif ftype == "map":
+                # Loop logic (简化演示)
+                print(" -> Map Loop Triggered")
+                current = rule.get("next", "end")
+                
+            elif ftype == "branch":
+                src_val = str(context.get(rule["source_var"], "")).strip()
+                print(f" -> Branching on '{src_val}'")
+                # 简单匹配
+                next_node = rule["default"]
+                for k, v in rule["branches"].items():
+                    if k in src_val:
+                        next_node = v
+                        break
+                current = next_node
+                
+            else:
+                current = "end"
+                
+        return dspy.Prediction(**context)
+
+# ==========================================
+# 4. 使用示例
+# ==========================================
+if __name__ == "__main__":
+    # 确保 dspy 配置了 LM
+    dspy.settings.configure(lm=dspy.DummyLM(["Intent: Technical"]))
+    
+    # 直接传入入口 yaml 文件路径
+    agent = DynamicBot("agent_dna/agent.yaml")
+    
+    # 运行
+    agent(user_query="My computer is broken", full_document_text="Manual...")
+```
+
+### 🌟 优势总结
+
+1.  **所见即所得 (WYSIWYG)**: 编写 Signature 时，`docstring` 可以写得非常详细，像写 Markdown 文档一样，这对 LLM 理解意图至关重要。
+2.  **关注点分离**: 
+    *   Prompt 工程师专注 `signatures/*.yaml`。
+    *   架构师专注 `graph/workflow.yaml`。
+    *   开发者专注 `modules/nodes.yaml`。
+3.  **可复用性**: 定义一次 `types.yaml` 或 `signatures.yaml`，可以在多个 Agent 中被 `include`。

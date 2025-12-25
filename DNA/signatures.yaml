@@ -1,0 +1,42 @@
+# definitions/signatures.yaml
+signatures:
+  RouterSignature:
+    docstring: |
+      You are a customer support manager. 
+      Analyze the incoming query to determine the customer's intent and urgency.
+      Please pay attention to the emotional tone of the user.
+    inputs:
+      user_query:
+        desc: "The raw text message from a customer ticket"
+        type: str
+    outputs:
+      intent:
+        desc: "One of: Billing, Technical, General, Spam"
+        type: CategoryEnum  # 引用 types.yaml 中的定义
+      urgency_score:
+        desc: "Integer 1-5 (5 is highest urgency)"
+        type: UrgencyEnum
+
+  ChunkSummarizerSignature:
+    docstring: |
+      Summarize the given text chunk.
+      Extract key information relevant to customer support issues like product bugs or refund requests.
+    inputs:
+      chunk_text:
+        desc: "A segment of a larger document"
+        type: str
+    outputs:
+      key_points:
+        desc: "Concise bullet points of key information"
+        type: str
+
+  RefundSignature:
+    docstring: "Handle refund requests based on company policy context."
+    inputs:
+      query:
+        desc: "User's specific refund request"
+      context:
+        desc: "Relevant policy document summary extracted from knowledge base"
+    outputs:
+      response:
+        desc: "A polite, policy-compliant response"

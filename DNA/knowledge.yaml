@@ -1,0 +1,13 @@
+knowledge_bases:
+  # 产品手册库
+  product_manuals:
+    type: chroma
+    path: "./data/vector_db/products"
+    embedding_model: "text-embedding-3-small"
+    top_k: 3
+
+  # 公司退换货政策
+  refund_policy:
+    type: txt_file
+    path: "./data/docs/policy_2024.txt"
+    chunk_size: 500

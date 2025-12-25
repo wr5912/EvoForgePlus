@@ -1,0 +1,12 @@
+tools:
+  # Python 本地函数
+  calculator:
+    path: "lib.utils.math_solver"   # 对应的 Python import 路径
+    desc: "执行精确数学计算"
+
+  # API 工具
+  order_query_api:
+    path: "lib.apis.order_system.get_order"
+    desc: "根据订单号查询物流状态"
+    params:
+      api_key: "${ENV_ORDER_API_KEY}" # 支持环境变量注入

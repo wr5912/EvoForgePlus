@@ -1,0 +1,24 @@
+workflow:
+  start_node: router_node
+
+  nodes:
+    router_node:
+      type: branch
+      source_var: intent
+      branches:
+        REFUND: refund_solver_node
+        CHAT: chat_node
+      default: chat_node
+
+    refund_solver_node:
+      type: action
+      action: process_refund
+      next: end_node
+
+    chat_node:
+      type: action
+      action: generate_response
+      next: end_node
+
+    end_node:
+      type: end

@@ -1,0 +1,7 @@
+# definitions/types.yaml
+types:
+  UrgencyEnum: "Literal[1, 2, 3, 4, 5]"
+  CategoryEnum: "Literal['Billing', 'Technical', 'General', 'Spam']"
+
+  # 如果将来支持 Pydantic Model，可以在这里定义结构
+  # CustomerInfo: ...

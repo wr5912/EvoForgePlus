@@ -1,0 +1,18 @@
+agent_id: customer_service_bot
+version: 1.0.0
+description: "电商售后全能助手"
+
+# 全局模型配置 (默认)
+model_config:
+  provider: gemini
+  model_name: "gemini/gemini-1.5-pro"
+  temperature: 0.2
+
+# 文件引用表 (Manifest)
+includes:
+  types: "types.yaml"
+  signatures: "signatures.yaml"
+  tools: "tools.yaml"
+  knowledge: "knowledge.yaml"
+  modules: "modules.yaml"
+  flow: "flow.yaml"

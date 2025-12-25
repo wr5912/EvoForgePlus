@@ -1,0 +1,29 @@
+modules:
+  # === 1. 意图路由节点 ===
+  router_node:
+    type: ChainOfThought
+    signature: RouterSignature  # 引用 signatures.yaml
+    # router 不需要工具和知识库
+
+  # === 2. 退款专家节点 ===
+  refund_solver_node:
+    type: ReAct
+    signature: RefundSignature
+
+    # [关键] 引用 resources/tools.yaml
+    tools:
+      - order_query_api
+      - calculator
+
+    # [关键] 引用 resources/knowledge.yaml
+    knowledge:
+      - refund_policy
+
+    # [可选] 覆盖全局模型配置 (例如这个节点需要更聪明的模型)
+    model_config:
+      model_name: "gpt-4-turbo"
+
+  # === 3. 闲聊节点 ===
+  chat_node:
+    type: Predict
+    signature: GeneralChatSignature
